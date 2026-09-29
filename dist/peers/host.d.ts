@@ -1,15 +1,14 @@
 /**
- * Host seam: narrow structural types plus the capability probe.
+ * Host seam: narrow structural types plus the harness probe.
  *
- * STRUCTURAL RULE (1): never import host singletons (`registry/agent-registry`,
- * `irc/bus`, `tools/hub/messaging`). The extension's module graph may bind a
- * FOREIGN copy of the host modules (two `static #global` instances), so the
- * host is touched ONLY through `ctx`/`pi` surfaces plus the bridge probed
- * below via literal-specifier dynamic imports inside try/catch (the host
- * loader rewrites literal specifiers to the host's own module instances).
- * Future #7401 seams slot in here.
+ * STRUCTURAL RULE: never read or write host singletons (`registry/agent-registry`,
+ * `irc/bus`). The extension's module graph may bind a FOREIGN copy of the
+ * host modules, and even the host's own registry is the host's local agent
+ * list: a peer registered there becomes a fake subagent that `agent://all`
+ * broadcasts reach, Agent Hub lists, and every spawned subagent can message.
+ * The host is touched ONLY through `ctx`/`pi` surfaces.
  */
-import type { PeerRecord, PeerTodo } from '../types.js';
+import type { HarnessKind, PeerTodo } from '../types.js';
 export interface SessionManagerLike {
     getSessionId?: () => string | undefined;
     /** Host session title (omp `ReadonlySessionManager.getSessionName`). */
@@ -45,6 +44,10 @@ export interface CommandContextLike {
     isIdle: () => boolean;
     setInterval?: (callback: () => void, ms?: number) => unknown;
     clearTimer?: (timer: unknown) => void;
+    /** The session's agent identity (omp `ExtensionContext.agent`): `main` for the root, `sub` for a task subagent. */
+    agent?: {
+        kind?: string;
+    };
     [key: string]: unknown;
 }
 export interface ToolInvokeResult {
@@ -65,67 +68,28 @@ export interface ExtensionHostLike {
         label: string;
         description: string;
         parameters: unknown;
+        /**
+         * omp mounts `discoverable` tools (its default) behind `write xd://<name>`
+         * rather than as direct tools; `essential` keeps them callable by name.
+         */
+        loadMode?: 'essential' | 'discoverable';
         execute: (toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolInvokeResult>;
     }): void;
     sendUserMessage?: (content: string, options?: {
         deliverAs?: 'steer' | 'followUp' | 'aside';
+        attribution?: 'user' | 'agent';
     }) => void | Promise<void>;
     getSessionName?: () => string | undefined;
     logger?: {
         warn(message: string): void;
     };
 }
-/** Structural view of one host registry ref (only the fields we read). */
-export interface RegistryRefLike {
-    id: unknown;
-    session?: unknown;
-    sessionFile?: unknown;
-    sessionId?: unknown;
-}
-/** Structural view of the HOST AgentRegistry (obtained via probe). */
-export interface RegistryLike {
-    get(id: string): {
-        session?: {
-            peerSocket?: unknown;
-        } | null;
-    } | undefined;
-    list?: () => RegistryRefLike[];
-    values?: () => Iterable<RegistryRefLike>;
-    entries?: () => Iterable<[unknown, RegistryRefLike]>;
-    register(input: Record<string, unknown>): unknown;
-    unregister(id: string): boolean;
-    setActivity?: (id: string, activity: string) => void;
-}
-export interface HubBridge {
-    registry: RegistryLike;
-}
 /**
- * True when the probed registry is the HOST's own (shared) copy. The host
- * always keeps its driving agent registered, so a shared copy resolves
- * `Main`; a foreign module copy — which the compiled omp binary hands to
- * dynamic importers — has an empty map and nothing we claim there is
- * visible to the host's `hub`. Bridges that fail this probe must not claim
- * refs or promise `hub send` in the roster.
+ * omp or pi? omp resolves its own package's module paths for extensions and
+ * pi does not, so the import is dynamic: a static one would fail to load
+ * under pi. Only the resolution is used; nothing on the module is read.
  */
-export declare function bridgeResolvesHost(bridge: HubBridge): boolean;
-export type HostProbe = {
-    kind: 'hub-bridge';
-    bridge: HubBridge;
-} | {
-    kind: 'tools';
-};
-/**
- * Capability probe. Literal specifiers only (the host rewrites them), always
- * inside try/catch: on any host without these modules this resolves
- * `{kind:'tools'}` and the extension falls back to the `peer_send` surface.
- * The result caches host MODULE handles only — never any session object.
- */
-export declare function probeHost(): Promise<HostProbe>;
-/**
- * `peerSocket` marker). Used to keep a session name from colliding with a
- * live subagent address during peer-name deconfliction.
- */
-export declare function listLocalAgentIds(registry: RegistryLike): string[];
+export declare function detectHarness(): Promise<HarnessKind>;
 /**
  * Who named this session. The host marks explicit renames `"user"` and
  * model-generated titles `"auto"` on the session header (on-contract via
@@ -144,25 +108,3 @@ export declare const MAX_PEER_TODO_TEXT_CHARS = 200;
  * `todo` toolResult. Never throws — a host without the surface reads as [].
  */
 export declare function readNativeTodos(manager: SessionManagerLike | undefined | null): PeerTodo[];
-export declare function peerActivityFor(record: PeerRecord): string;
-export type PeerRequestFn = (socket: string, frame: {
-    t: 'msg';
-    from: string;
-    body: string;
-    replyTo?: string;
-    hop: number;
-}) => Promise<{
-    ok: boolean;
-    outcome?: string;
-    error?: string;
-} | undefined>;
-/**
- * Materialize a remote peer as a registry ref so native `hub send`/`hub list`
- * reach it. `kind:'sub'` + `status:'idle'` keeps the stub inside the host's
- * flat alive filter and clear of the parked lifecycle gate, so `hub send`
- * goes straight to the stub's `deliverIrcMessage` (socket round trip).
- * Refuses to overwrite a live local (non-peer) ref of the same id.
- */
-export declare function claimBridgedPeer(bridge: HubBridge, record: PeerRecord, ownName: string, getHop: () => number, request: PeerRequestFn, onWarn?: (message: string) => void): boolean;
-/** Release a bridged peer ref, but only one this extension owns (marker). */
-export declare function releaseBridgedPeer(bridge: HubBridge, name: string): void;

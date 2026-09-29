@@ -71,15 +71,11 @@ export function peerNameFromSession(raw, cwd, pid, opts = {}) {
 }
 /**
  * First-wins by `startedAt`: when another live peer holds `candidate` and
- * started no later than us (or a local id holds it), take `<candidate>-<pid>`.
- * The suffixed form is intentionally exempt from the 24-char cap so it stays
- * deterministic and searchable.
+ * started no later than us, take `<candidate>-<pid>`. The suffixed form is
+ * intentionally exempt from the 24-char cap so it stays deterministic and
+ * searchable.
  */
 export function resolvePeerName(input) {
-    const heldByLocal = input.localIds !== undefined
-        ? [...input.localIds].some((id) => id === input.candidate)
-        : false;
-    const clash = heldByLocal ||
-        input.peers.some((p) => p.pid !== input.pid && p.name === input.candidate && p.startedAt <= input.startedAt);
+    const clash = input.peers.some((p) => p.pid !== input.pid && p.name === input.candidate && p.startedAt <= input.startedAt);
     return clash ? `${input.candidate}-${input.pid}` : input.candidate;
 }

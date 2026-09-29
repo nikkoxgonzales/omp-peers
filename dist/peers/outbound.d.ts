@@ -30,6 +30,8 @@ export interface OutboundDeps {
     /** Explicit hop override — wins over `state`. */
     hop?: number;
     replyTo?: string;
+    /** PURE RECEIPT — RECEIVER SHOWS A TOAST, NEVER WAKES, NO REPLY EXPECTED. */
+    ack?: boolean;
     listPeers: () => Promise<PeerRecord[]>;
     reap?: (record: PeerRecord) => Promise<void> | void;
 }

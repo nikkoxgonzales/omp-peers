@@ -74,7 +74,7 @@ export function peerNameFromSession(
   raw: string | undefined,
   cwd: string,
   pid: number,
-  opts: { titleSource?: string } = {}
+  opts: { titleSource?: string | undefined } = {}
 ): { name: string; rejected?: string } {
   // Model-generated titles are never addresses: they express no user intent
   // and the host rewrites them (replan refresh), so adopting one would flap
@@ -93,25 +93,17 @@ export interface ResolveNameInput {
   pid: number;
   startedAt: number;
   peers: PeerRecord[];
-  /** Live local subagent ids — treated as held, like an older peer. */
-  localIds?: Iterable<string>;
 }
 
 /**
  * First-wins by `startedAt`: when another live peer holds `candidate` and
- * started no later than us (or a local id holds it), take `<candidate>-<pid>`.
- * The suffixed form is intentionally exempt from the 24-char cap so it stays
- * deterministic and searchable.
+ * started no later than us, take `<candidate>-<pid>`. The suffixed form is
+ * intentionally exempt from the 24-char cap so it stays deterministic and
+ * searchable.
  */
 export function resolvePeerName(input: ResolveNameInput): string {
-  const heldByLocal =
-    input.localIds !== undefined
-      ? [...input.localIds].some((id) => id === input.candidate)
-      : false;
-  const clash =
-    heldByLocal ||
-    input.peers.some(
-      (p) => p.pid !== input.pid && p.name === input.candidate && p.startedAt <= input.startedAt
-    );
+  const clash = input.peers.some(
+    (p) => p.pid !== input.pid && p.name === input.candidate && p.startedAt <= input.startedAt
+  );
   return clash ? `${input.candidate}-${input.pid}` : input.candidate;
 }

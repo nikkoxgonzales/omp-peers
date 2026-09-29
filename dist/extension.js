@@ -2,10 +2,10 @@
  * peers OMP/pi extension entry.
  *
  * Install is opt-in; every running instance is auto-present via its
- * `<state>/peers/<pid>.json` heartbeat — no join/leave/channels. On omp the
- * bridge materializes peers as native `hub` refs (best-effort where the
- * registry is shared); one `peer_send` tool registers in EVERY mode as the
- * guaranteed agent path. Explicit names only, no `to:all` in v1.
+ * `<state>/peers/<pid>.json` heartbeat — no join/leave/channels. Peers are
+ * reached only through the `peer_*` tools; they are never registered in the
+ * host's agent registry, so `agent://` messaging, Agent Hub and subagents
+ * stay local to their own instance. Explicit names only, no `to:all`.
  *
  * Peer name = session name: the host's builtin `/rename <name>` is the only
  * naming surface. A raw session name is adopted as the peer address when it
@@ -20,20 +20,16 @@
  * `sessionManager.getSessionId()`.
  */
 import { registerPeersCommand } from './commands/peers.js';
-import { bridgeResolvesHost, claimBridgedPeer, listLocalAgentIds, peerActivityFor, probeHost, readNativeTodos, readTitleSource, releaseBridgedPeer, } from './peers/host.js';
+import { detectHarness, readNativeTodos, readTitleSource } from './peers/host.js';
 import { defaultPeerName, isValidPeerName, peerNameFromSession, resolvePeerName } from './peers/ids.js';
 import { deliverInboundPeerMessage, HOLD_POLL_MS, MAX_HELD_BATCHES } from './peers/inbound.js';
 import { outboundHop, sendToPeer } from './peers/outbound.js';
 import { HEARTBEAT_MS, listLivePeers, removePeerRecord, startPresenceBeat, writePeerBeat, } from './peers/presence.js';
 import { appendNoteToMessages, buildPeersNote } from './peers/roster.js';
-import { peerSocketAddress, requestPeer, startPeerServer } from './peers/server.js';
+import { peerSocketAddress, startPeerServer } from './peers/server.js';
 import { ensureStateDirs, resolveStateDir } from './store/paths.js';
 import { registerPeerSendTool, registerPeerStatusTool, registerPeerRequestTool } from './tools.js';
-/** Module-scope host probe: caches MODULE handles only, never sessions. */
-const probe = await probeHost();
-const HARNESS = probe.kind === 'hub-bridge' ? 'omp' : 'pi';
-const MODE = probe.kind === 'hub-bridge' ? 'hub' : 'tools';
-const BRIDGE = probe.kind === 'hub-bridge' ? probe.bridge : undefined;
+const HARNESS = await detectHarness();
 /** How long a started tool keeps naming the peer's activity before busy/idle takes over. */
 const ACTIVITY_FRESH_MS = 120_000;
 /** One node per process, even when several sessions load the extension. */
@@ -106,14 +102,6 @@ function warnOf(st, text) {
         // Warnings never throw into the host.
     }
 }
-/**
- * Roster/delivery mode reflects reality: a bridge over a foreign registry
- * copy cannot resolve host refs, so neither the roster note nor the reply
- * hint may promise `hub` op=send. See bridgeResolvesHost.
- */
-function rosterMode() {
-    return BRIDGE !== undefined && bridgeResolvesHost(BRIDGE) ? 'hub' : 'tools';
-}
 function logOf(st, text) {
     try {
         st.current?.pi.logger?.warn(text);
@@ -183,25 +171,14 @@ async function tick(st) {
         others = (await listLivePeers(st.stateDir, st.pid)).filter((p) => p.pid !== st.pid);
     }
     catch {
-        // Transient listing failure: fall back to the last-good roster below
-        // and skip the bridge sync — never release claims on a failed listing.
+        // Transient listing failure: fall back to the last-good roster below.
         others = undefined;
-    }
-    let localIds = [];
-    if (BRIDGE !== undefined) {
-        try {
-            localIds = listLocalAgentIds(BRIDGE.registry);
-        }
-        catch {
-            localIds = [];
-        }
     }
     st.name = resolvePeerName({
         candidate: base,
         pid: st.pid,
         startedAt: st.startedAt,
         peers: others ?? st.peers.filter((p) => p.pid !== st.pid),
-        localIds,
     });
     st.sessionId = sessionId;
     st.nativeTodos = readNativeTodos(st.current?.ctx.sessionManager);
@@ -236,52 +213,6 @@ async function tick(st) {
         own !== undefined
             ? [...(others ?? lastOthers), own].sort((a, b) => a.name.localeCompare(b.name))
             : (others ?? lastOthers);
-    if (BRIDGE !== undefined && others !== undefined)
-        syncBridge(st, others);
-}
-function syncBridge(st, others) {
-    // A foreign registry copy (compiled omp binary) never resolves the host's
-    // own refs — claiming stubs there is invisible to the host `hub` and the
-    // roster must not promise it. See bridgeResolvesHost.
-    if (BRIDGE === undefined || !bridgeResolvesHost(BRIDGE))
-        return;
-    const seen = new Set();
-    for (const record of others) {
-        seen.add(record.name);
-        if (!st.claimed.has(record.name)) {
-            const ok = claimBridgedPeer(BRIDGE, record, st.name, () => outboundHop(st, record.name, false), (socket, frame) => requestPeer(socket, frame), (text) => {
-                // A persistent name collision would re-warn every tick — once per
-                // name is enough; the entry clears if the claim later succeeds.
-                if (st.claimWarned.has(record.name))
-                    return;
-                st.claimWarned.add(record.name);
-                logOf(st, text);
-            });
-            if (ok) {
-                st.claimed.add(record.name);
-                st.claimWarned.delete(record.name);
-            }
-        }
-        // Refresh activity every tick, not just on first claim — '(working)' and
-        // cwd go stale otherwise. Only for refs we own: a failed claim means a
-        // local agent holds the name and its activity is not ours to write.
-        if (st.claimed.has(record.name)) {
-            try {
-                BRIDGE?.registry.setActivity?.(record.name, peerActivityFor(record));
-            }
-            catch {
-                // Activity updates are best-effort.
-            }
-        }
-    }
-    for (const name of [...st.claimed]) {
-        if (seen.has(name))
-            continue;
-        if (BRIDGE !== undefined)
-            releaseBridgedPeer(BRIDGE, name);
-        st.claimed.delete(name);
-        st.claimWarned.delete(name);
-    }
 }
 function armBeatTimer(st, ctx) {
     try {
@@ -325,8 +256,6 @@ function ensureNode(pi, ctx) {
             name: '',
             sessionId: '',
             peers: [],
-            claimed: new Set(),
-            claimWarned: new Set(),
             wakes: new Map(),
             lastInboundPeer: undefined,
             lastInboundHop: 0,
@@ -458,12 +387,6 @@ async function stopNode(st) {
         // Shutdown never throws.
     }
     st.server = undefined;
-    if (BRIDGE !== undefined) {
-        for (const name of st.claimed)
-            releaseBridgedPeer(BRIDGE, name);
-        st.claimed.clear();
-        st.claimWarned.clear();
-    }
     if (hasSuccessor())
         return;
     try {
@@ -485,25 +408,31 @@ export default function peersExtension(pi) {
             catch {
                 // Snapshot stays last-good.
             }
-            return { ownName: st.name, mode: rosterMode(), peers: st.peers, held: st.held.length };
+            return { ownName: st.name, peers: st.peers, held: st.held.length };
         }
-        return { ownName: '', mode: rosterMode(), peers: [], held: 0 };
+        return { ownName: '', peers: [], held: 0 };
     });
-    // NOTE: `peer_send` registers UNCONDITIONALLY in every mode. The bridge may
-    // bind a foreign registry copy on compiled hosts, making native `hub` refs
-    // best-effort only — `peer_send` (socket → far-end `sendUserMessage`) is the
-    // guaranteed reply path in ALL modes.
+    // Sends resolve names from the presence directory at call time, not from
+    // the heartbeat cache: a /rename reaches the directory at the renamer's next
+    // beat, and a cached roster answers "Unknown peer" until the sender's own
+    // next beat as well. The pid filter drops our own record, so a stale own
+    // name (post-/rename) can't route a send back to ourselves.
+    const freshPeers = async () => {
+        const st = liveNode();
+        if (st === undefined)
+            return [];
+        return (await listLivePeers(st.stateDir, st.pid)).filter((p) => p.pid !== st.pid);
+    };
     registerPeerSendTool(pi, {
-        send: (to, message, replyTo) => {
+        send: (to, message, replyTo, ack) => {
             const st = liveNode();
             return sendToPeer(to, message, {
                 ownName: st?.name ?? '',
                 ...(st !== undefined ? { state: st } : {}),
                 isReply: replyTo !== undefined,
-                // st.peers includes our own record — filter by pid so a stale own
-                // name (post-/rename) can't route a send back to ourselves.
-                listPeers: async () => (st?.peers ?? []).filter((p) => p.pid !== st?.pid),
+                listPeers: freshPeers,
                 ...(replyTo !== undefined ? { replyTo } : {}),
+                ...(ack ? { ack: true } : {}),
                 reap: (record) => {
                     if (st !== undefined)
                         void removePeerRecord(st.stateDir, record.pid);
@@ -512,12 +441,7 @@ export default function peersExtension(pi) {
         },
     });
     registerPeerStatusTool(pi, {
-        listPeers: async () => {
-            const st = liveNode();
-            if (st === undefined)
-                return [];
-            return listLivePeers(st.stateDir, st.pid).then((ps) => ps.filter((p) => p.pid !== st.pid));
-        },
+        listPeers: freshPeers,
     });
     registerPeerRequestTool(pi, {
         ownName: () => liveNode()?.name ?? '',
@@ -525,12 +449,7 @@ export default function peersExtension(pi) {
             const st = liveNode();
             return st === undefined ? 0 : outboundHop(st, to, false);
         },
-        listPeers: async () => {
-            const st = liveNode();
-            if (st === undefined)
-                return [];
-            return (st.peers ?? []).filter((p) => p.pid !== st.pid);
-        },
+        listPeers: freshPeers,
         send: (to, message, outDeps) => {
             const st = liveNode();
             return sendToPeer(to, message, {
@@ -545,7 +464,12 @@ export default function peersExtension(pi) {
     pi.on('session_start', (_event, ctx) => {
         ensureNode(pi, ctx);
     });
-    pi.on('session_shutdown', () => {
+    pi.on('session_shutdown', (_event, ctx) => {
+        // omp disposes every finished `task` subagent session, which fires
+        // session_shutdown on that session's own extension instance. Only the
+        // root session's shutdown ends this peer.
+        if (ctx?.agent?.kind === 'sub')
+            return;
         const st = node;
         node = undefined;
         if (st !== undefined)
@@ -641,27 +565,16 @@ export default function peersExtension(pi) {
         // Auto-titles never claim the peer name, even valid-looking ones: the
         // host rewrites them, which would flap the address mid-life.
         if (sessionName !== undefined && isValidPeerName(sessionName) && readTitleSource(ctx?.sessionManager) !== 'auto') {
-            const others = st.peers.filter((p) => p.pid !== st.pid);
-            let localIds = [];
-            if (BRIDGE !== undefined) {
-                try {
-                    localIds = listLocalAgentIds(BRIDGE.registry);
-                }
-                catch {
-                    localIds = [];
-                }
-            }
             st.name = resolvePeerName({
                 candidate: sessionName,
                 pid: st.pid,
                 startedAt: st.startedAt,
-                peers: others,
-                localIds,
+                peers: st.peers.filter((p) => p.pid !== st.pid),
             });
         }
         // Always inject: the agent learns its OWN peer name here, even solo.
         const others = st.peers.filter((p) => p.pid !== st.pid);
-        const note = buildPeersNote(st.name, others, rosterMode());
+        const note = buildPeersNote(st.name, others);
         const payload = event;
         if (payload === undefined || !Array.isArray(payload.messages))
             return undefined;

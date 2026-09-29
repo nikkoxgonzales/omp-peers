@@ -50,6 +50,7 @@ export async function sendToPeer(to, message, deps) {
             from: deps.ownName,
             body,
             ...(deps.replyTo !== undefined && deps.replyTo !== '' ? { replyTo: deps.replyTo } : {}),
+            ...(deps.ack === true ? { ack: true } : {}),
             hop,
         });
         if (reply === undefined) {
@@ -73,6 +74,8 @@ export async function sendToPeer(to, message, deps) {
             return `Held at ${name} (typing) — delivers when they submit. Its reply will arrive as a peer message.`;
         if (reply.outcome === 'replied')
             return `Replied to ${name}.`;
+        if (reply.outcome === 'acked')
+            return `Ack delivered to ${name} (toast — no wake, no reply expected).`;
         return `Delivered to ${name} (${reply.outcome ?? 'injected'}). Its reply will arrive as a peer message.`;
     }
     catch (err) {

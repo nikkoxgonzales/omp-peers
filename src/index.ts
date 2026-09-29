@@ -81,31 +81,24 @@ export { sendToPeer, outboundHop, type HopState, type OutboundDeps } from './pee
 export {
   buildPeersNote,
   appendNoteToMessages,
-  type RosterMode,
   type RosterMessage,
 } from './peers/roster.js';
 
 // Host seam.
 export {
-  probeHost,
-  listLocalAgentIds,
-  claimBridgedPeer,
+  detectHarness,
   readTitleSource,
   readNativeTodos,
   MAX_PEER_TODOS,
   MAX_PEER_TODO_TEXT_CHARS,
-  releaseBridgedPeer,
-  peerActivityFor,
-  type HostProbe,
-  type HubBridge,
-  type RegistryLike,
-  type RegistryRefLike,
-  type PeerRequestFn,
   type CommandContextLike,
   type ExtensionHostLike,
   type UiLike,
   type SelectOption,
 } from './peers/host.js';
+
+// Socket input checks.
+export { checkFrame, checkReply, type FrameCheck, type FrameRejection } from './peers/wire.js';
 
 // Commands (pure text formatters for tests/consumers).
 export { formatPeersText, formatPeerLine, type PeersSnapshot } from './commands/peers.js';

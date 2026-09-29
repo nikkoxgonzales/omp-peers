@@ -39,6 +39,8 @@ export interface OutboundDeps {
   /** Explicit hop override — wins over `state`. */
   hop?: number;
   replyTo?: string;
+  /** PURE RECEIPT — RECEIVER SHOWS A TOAST, NEVER WAKES, NO REPLY EXPECTED. */
+  ack?: boolean;
   listPeers: () => Promise<PeerRecord[]>;
   reap?: (record: PeerRecord) => Promise<void> | void;
 }
@@ -73,6 +75,7 @@ export async function sendToPeer(
       from: deps.ownName,
       body,
       ...(deps.replyTo !== undefined && deps.replyTo !== '' ? { replyTo: deps.replyTo } : {}),
+      ...(deps.ack === true ? { ack: true } : {}),
       hop,
     });
     if (reply === undefined) {
@@ -90,6 +93,7 @@ export async function sendToPeer(
       return `Delivered to ${name} (coalesced into a batch). Its reply will arrive as a peer message.`;
     if (reply.outcome === 'held') return `Held at ${name} (typing) — delivers when they submit. Its reply will arrive as a peer message.`;
     if (reply.outcome === 'replied') return `Replied to ${name}.`;
+    if (reply.outcome === 'acked') return `Ack delivered to ${name} (toast — no wake, no reply expected).`;
     return `Delivered to ${name} (${reply.outcome ?? 'injected'}). Its reply will arrive as a peer message.`;
   } catch (err) {
     return `Delivery to ${name} failed: ${err instanceof Error ? err.message : String(err)}`;

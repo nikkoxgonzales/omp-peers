@@ -20,7 +20,9 @@ export { sendToPeer, outboundHop } from './peers/outbound.js';
 // Roster.
 export { buildPeersNote, appendNoteToMessages, } from './peers/roster.js';
 // Host seam.
-export { probeHost, listLocalAgentIds, claimBridgedPeer, readTitleSource, readNativeTodos, MAX_PEER_TODOS, MAX_PEER_TODO_TEXT_CHARS, releaseBridgedPeer, peerActivityFor, } from './peers/host.js';
+export { detectHarness, readTitleSource, readNativeTodos, MAX_PEER_TODOS, MAX_PEER_TODO_TEXT_CHARS, } from './peers/host.js';
+// Socket input checks.
+export { checkFrame, checkReply } from './peers/wire.js';
 // Commands (pure text formatters for tests/consumers).
 export { formatPeersText, formatPeerLine } from './commands/peers.js';
 // Agent tool surface (registered unconditionally in every mode).

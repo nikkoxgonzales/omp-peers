@@ -19,7 +19,7 @@ export function formatPeersText(snap, now) {
     const lines = [...snap.peers]
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((p) => formatPeerLine(p, now, snap.ownName));
-    const header = `peers (${snap.peers.length}) — you are \`${snap.ownName}\` via ${snap.mode === 'hub' ? 'hub bridge' : 'peer tools'}${(snap.held ?? 0) > 0 ? ` · held ${snap.held}` : ''}`;
+    const header = `peers (${snap.peers.length}) — you are \`${snap.ownName}\`${(snap.held ?? 0) > 0 ? ` · held ${snap.held}` : ''}`;
     return lines.length === 0 ? `${header} — no peers` : `${header}\n${lines.join('\n')}`;
 }
 export function registerPeersCommand(pi, getSnapshot) {

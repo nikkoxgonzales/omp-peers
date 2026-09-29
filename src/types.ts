@@ -71,7 +71,7 @@ export interface PeerRecord {
 
 /** Frame exchanged over a peer socket, one JSON object per line. */
 export type PeerFrame =
-  | { t: 'msg'; from: string; body: string; replyTo?: string; hop?: number }
+  | { t: 'msg'; from: string; body: string; replyTo?: string; hop?: number; ack?: boolean }
   | { t: 'ping'; from: string };
 
 /** One-line JSON reply to a {@link PeerFrame}. */

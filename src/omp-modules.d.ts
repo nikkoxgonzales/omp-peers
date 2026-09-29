@@ -7,4 +7,3 @@
  * where the module does not exist.
  */
 declare module '@oh-my-pi/pi-coding-agent/registry/agent-registry';
-declare module '@oh-my-pi/pi-coding-agent/tools/hub/messaging';

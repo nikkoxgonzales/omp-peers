@@ -18,6 +18,7 @@ import { rm } from 'node:fs/promises';
 
 import { peersDir } from '../store/paths.js';
 import type { PeerFrame, PeerReply } from '../types.js';
+import { checkFrame, checkReply } from './wire.js';
 
 /** Max agent-to-agent relays from the last human prompt before refusal. */
 export const MAX_HOPS = 4;
@@ -41,6 +42,8 @@ export interface InboundMessage {
   body: string;
   replyTo?: string;
   hop: number;
+  /** PURE RECEIPT — NEVER WAKES THE RECEIVER; RENDERED AS ONE DIM TOAST. */
+  ack?: boolean;
 }
 
 export interface PeerServerOptions {
@@ -111,20 +114,34 @@ export function startPeerServer(opts: PeerServerOptions): PeerServerHandle {
     }
   }
 
+  // Frame handlers run fire-and-forget off socket events. A throw escaping
+  // one is an unhandled rejection, and that terminates the host process.
+  function contain(task: Promise<void>, what: string): void {
+    task.catch((err: unknown) => {
+      try {
+        opts.onWarn?.(`peers: ${what} failed: ${err instanceof Error ? err.message : String(err)}`);
+      } catch {
+        // Warning delivery is best-effort.
+      }
+    });
+  }
+
   async function handleFrame(line: string, socket: Socket): Promise<void> {
-    let frame: PeerFrame;
+    let decoded: unknown;
     try {
-      frame = JSON.parse(line) as PeerFrame;
+      decoded = JSON.parse(line);
     } catch {
       reply(socket, { ok: false, error: 'bad frame' });
       return;
     }
-    if (frame.t === 'ping') {
-      reply(socket, { ok: true, name: opts.ownName() });
+    const checked = checkFrame(decoded);
+    if (!checked.ok) {
+      reply(socket, { ok: false, error: checked.error });
       return;
     }
-    if (frame.t !== 'msg') {
-      reply(socket, { ok: false, error: 'unknown frame' });
+    const frame = checked.frame;
+    if (frame.t === 'ping') {
+      reply(socket, { ok: true, name: opts.ownName() });
       return;
     }
     const hop = normalizeHop(frame.hop);
@@ -142,8 +159,20 @@ export function startPeerServer(opts: PeerServerOptions): PeerServerHandle {
       });
       return;
     }
-    if (typeof frame.from !== 'string' || frame.from === '' || typeof frame.body !== 'string') {
-      reply(socket, { ok: false, error: 'bad frame' });
+    if (frame.ack === true) {
+      // ACKS BYPASS THE COALESCE QUEUE ENTIRELY: A RECEIPT MUST DELIVER
+      // IMMEDIATELY, NEVER BATCH, NEVER DELAY A REAL MESSAGE SLOT.
+      try {
+        const outcome = await opts.onMessage({
+          from: frame.from,
+          body: frame.body,
+          hop,
+          ack: true,
+        });
+        reply(socket, { ok: true, outcome });
+      } catch (err) {
+        reply(socket, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
       return;
     }
     const known = pending.get(frame.from);
@@ -155,11 +184,11 @@ export function startPeerServer(opts: PeerServerOptions): PeerServerHandle {
     }
     pending.set(frame.from, {
       bodies: [frame.body],
-      ...(typeof frame.replyTo === 'string' && frame.replyTo !== '' ? { replyTo: frame.replyTo } : {}),
+      ...(frame.replyTo !== undefined && frame.replyTo !== '' ? { replyTo: frame.replyTo } : {}),
       hop,
       first: socket,
     });
-    void deliverBatch(frame.from, socket);
+    contain(deliverBatch(frame.from, socket), 'batch delivery');
   }
 
   function accept(socket: Socket): void {
@@ -203,7 +232,7 @@ export function startPeerServer(opts: PeerServerOptions): PeerServerHandle {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
         index = buffer.indexOf('\n');
-        void handleFrame(line, socket);
+        contain(handleFrame(line, socket), 'frame handling');
       }
     });
   }
@@ -282,6 +311,13 @@ export function requestPeer(
   frame: PeerFrame,
   timeoutMs: number = PEER_REQUEST_TIMEOUT_MS
 ): Promise<PeerReply | undefined> {
+  // An oversized frame is refused here, before any byte is written. Left to
+  // the receiver, it closes the socket mid-write and the sender sees EPIPE
+  // (macOS) instead of the "too large" reply the receiver tried to send.
+  const payload = `${JSON.stringify(frame)}\n`;
+  if (Buffer.byteLength(payload, 'utf8') > MAX_FRAME_BYTES) {
+    return Promise.resolve({ ok: false, error: 'frame too large' });
+  }
   return new Promise<PeerReply | undefined>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
@@ -307,7 +343,7 @@ export function requestPeer(
     });
     socket.on('connect', () => {
       try {
-        socket.write(`${JSON.stringify(frame)}\n`);
+        socket.write(payload);
       } catch (err) {
         finish({ ok: false, error: err instanceof Error ? err.message : String(err) });
       }
@@ -319,12 +355,17 @@ export function requestPeer(
         finish({ ok: false, error: 'response too large' });
         return;
       }
+      // A reply can arrive split across chunks: wait for its newline.
       const index = buffer.indexOf('\n');
+      if (index === -1) return;
+      let decoded: unknown;
       try {
-        finish(JSON.parse(buffer.slice(0, index)) as PeerReply);
+        decoded = JSON.parse(buffer.slice(0, index));
       } catch {
         finish({ ok: false, error: 'bad response' });
+        return;
       }
+      finish(checkReply(decoded) ?? { ok: false, error: 'bad response' });
     });
     socket.on('close', () => finish(undefined));
   });

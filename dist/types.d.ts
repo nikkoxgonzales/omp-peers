@@ -66,6 +66,7 @@ export type PeerFrame = {
     body: string;
     replyTo?: string;
     hop?: number;
+    ack?: boolean;
 } | {
     t: 'ping';
     from: string;

@@ -2,10 +2,10 @@
  * peers OMP/pi extension entry.
  *
  * Install is opt-in; every running instance is auto-present via its
- * `<state>/peers/<pid>.json` heartbeat — no join/leave/channels. On omp the
- * bridge materializes peers as native `hub` refs (best-effort where the
- * registry is shared); one `peer_send` tool registers in EVERY mode as the
- * guaranteed agent path. Explicit names only, no `to:all` in v1.
+ * `<state>/peers/<pid>.json` heartbeat — no join/leave/channels. Peers are
+ * reached only through the `peer_*` tools; they are never registered in the
+ * host's agent registry, so `agent://` messaging, Agent Hub and subagents
+ * stay local to their own instance. Explicit names only, no `to:all`.
  *
  * Peer name = session name: the host's builtin `/rename <name>` is the only
  * naming surface. A raw session name is adopted as the peer address when it

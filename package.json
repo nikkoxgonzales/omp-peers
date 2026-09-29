@@ -1,6 +1,6 @@
 {
   "name": "omp-peers",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Claude-Code-style cross-session peer awareness for Oh My Pi (omp) and pi: every running instance sees every other, live, on the same machine — /peers to list, /rename to name, peer_send to talk.",
   "type": "module",
   "main": "./dist/index.js",

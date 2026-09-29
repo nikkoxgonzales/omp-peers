@@ -3,10 +3,10 @@
  * OMP_PEERS_DIR pointed at a fresh temp dir.
  * Covers: presence beat → roster lists both fake peers; outbound socket frame
  * → inbound path with a FAKE pi capturing `sendUserMessage` calls — attributed
- * `[peer <name>]` text delivered with default options (never a hardcoded
+ * `[peer <name>]` text delivered with `agent` attribution (never a hardcoded
  * driving-agent name, no registry lookup); over-budget wakes queue as
- * followUps (deliverAs 'followUp' — queued, never waking); bridgeless hosts
- * still deliver; empty frames, missing contexts, and sendUserMessage
+ * followUps (deliverAs 'followUp' — queued, never waking); empty frames,
+ * missing contexts, and sendUserMessage
  * rejections drop without touching the host; hop-cap refusal both locally
  * (before any socket I/O) and server-side; conversation-aware hop accounting
  * (a request/reply round trip stays level, a relay advances, a human prompt
@@ -23,7 +23,7 @@
  */
 
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -104,12 +104,15 @@ describe('presence beat → roster lists both peers', () => {
     const live = await listLivePeers(STATE, 47111, { isAlive: ALIVE });
     assert.equal(live.length, 2);
     assert.deepEqual(live.map((p) => p.name), ['alpha', 'beta']);
-    const note = buildPeersNote('alpha', live, 'tools');
+    const note = buildPeersNote('alpha', live);
     assert.match(note, /`alpha`/);
     assert.match(note, /`beta`/);
     assert.match(note, /peer_send/);
-    const hubNote = buildPeersNote('alpha', live, 'hub');
-    assert.match(hubNote, /`hub`/);
+    // Never a native `hub` path: peers are not in the host's agent registry.
+    assert.doesNotMatch(note, /`hub`/);
+    // Live state stays out of the note, which must not change mid-turn and
+    // invalidate the provider's prompt cache (beta is busy here).
+    assert.doesNotMatch(note, /\((working|idle)\)/);
   });
 
   it('reaps dead pids and expired beats on sight', async () => {
@@ -137,7 +140,7 @@ describe('presence beat → roster lists both peers', () => {
   });
 
   it('compacts the roster note when no peers are live', () => {
-    const solo = buildPeersNote('alpha', [], 'tools');
+    const solo = buildPeersNote('alpha', []);
     assert.match(solo, /`alpha`/);
     assert.match(solo, /No other peers are live/);
     assert.doesNotMatch(solo, /peer_send/);
@@ -148,7 +151,6 @@ describe('presence beat → roster lists both peers', () => {
     const text = formatPeersText(
       {
         ownName: 'alpha',
-        mode: 'hub',
         peers: [
           {
             v: 1, pid: 47111, name: 'alpha', cwd: '/w/a', project: 'a', harness: 'omp',
@@ -163,9 +165,9 @@ describe('presence beat → roster lists both peers', () => {
 
   it('surfaces held batches in the /peers header', () => {
     const now = Date.now();
-    const held = formatPeersText({ ownName: 'alpha', mode: 'tools', peers: [], held: 2 }, now);
+    const held = formatPeersText({ ownName: 'alpha', peers: [], held: 2 }, now);
     assert.match(held, /held 2/);
-    const clear = formatPeersText({ ownName: 'alpha', mode: 'tools', peers: [] }, now);
+    const clear = formatPeersText({ ownName: 'alpha', peers: [] }, now);
     assert.doesNotMatch(clear, /held/);
   });
 
@@ -289,6 +291,83 @@ describe('outbound frame → inbound path', () => {
     assert.equal(res?.ok, false);
     assert.match(res?.error ?? '', /too large/);
     assert.equal(deliveries, before);
+  });
+
+  // One raw line to the socket; resolves the reply line, or undefined on close.
+  const rawRequest = (address, text) =>
+    new Promise((resolve) => {
+      const socket = createConnection(address, () => socket.write(`${text}\n`));
+      socket.setEncoding('utf8');
+      let buffer = '';
+      socket.on('data', (chunk) => {
+        buffer += chunk;
+        const index = buffer.indexOf('\n');
+        if (index === -1) return;
+        socket.destroy();
+        resolve(JSON.parse(buffer.slice(0, index)));
+      });
+      socket.on('close', () => resolve(undefined));
+      socket.on('error', () => resolve(undefined));
+    });
+
+  it('refuses malformed frames and keeps serving', async () => {
+    const before = deliveries;
+    const cases = [
+      ['null', 'bad frame'],
+      ['42', 'bad frame'],
+      ['"text"', 'bad frame'],
+      ['[]', 'bad frame'],
+      ['{}', 'unknown frame'],
+      ['{"t":"nope","from":"x"}', 'unknown frame'],
+      ['{"t":"ping"}', 'bad frame'],
+      ['{"t":"msg"}', 'bad frame'],
+      ['{"t":"msg","from":1,"body":"x"}', 'bad frame'],
+      ['{"t":"msg","from":"","body":"x"}', 'bad frame'],
+      ['{"t":"msg","from":"x","body":null}', 'bad frame'],
+      ['{"t":"msg","from":"x","body":"y","hop":"2"}', 'bad frame'],
+      ['{"t":"msg","from":"x","body":"y","replyTo":7}', 'bad frame'],
+      ['{"t":"msg","from":"x","body":"y","ack":"yes"}', 'bad frame'],
+      ['not json', 'bad frame'],
+    ];
+    for (const [text, error] of cases) {
+      assert.deepEqual(await rawRequest(addrB, text), { ok: false, error }, text);
+    }
+    assert.equal(deliveries, before);
+    assert.deepEqual(await rawRequest(addrB, '{"t":"ping","from":"x"}'), { ok: true, name: 'beta' });
+  });
+
+  describe('malformed replies', () => {
+    const addrR = peerSocketAddress(STATE, 47555);
+    let answer = '';
+    let replier;
+    before(async () => {
+      // Answers every request with `answer`, written in two halves so the
+      // client has to reassemble a reply split across chunks.
+      replier = createServer((socket) => {
+        socket.once('data', () => {
+          const half = Math.floor(answer.length / 2);
+          socket.write(answer.slice(0, half));
+          setTimeout(() => socket.end(answer.slice(half)), 30);
+        });
+      });
+      await new Promise((resolve) => replier.listen(addrR, resolve));
+    });
+    after(() => new Promise((resolve) => replier.close(resolve)));
+
+    const ask = async (text) => {
+      answer = text;
+      return requestPeer(addrR, { t: 'ping', from: 'alpha' });
+    };
+
+    it('reassembles a reply split across chunks', async () => {
+      assert.deepEqual(await ask('{"ok":true,"outcome":"injected"}\n'), { ok: true, outcome: 'injected' });
+    });
+
+    it('turns a reply of the wrong shape into a bad-response failure', async () => {
+      for (const text of ['null', '[]', '{"outcome":"x"}', '{"ok":"yes"}', '{"ok":true,"error":5}']) {
+        assert.deepEqual(await ask(`${text}\n`), { ok: false, error: 'bad response' }, text);
+      }
+    });
   });
 
   it('reports held receipts with typing text', async () => {
@@ -463,7 +542,7 @@ describe('inbound delivery against a fake host', () => {
     return { cur, deps: { getCurrent: () => ({ pi: cur.pi, ctx: cur.ctx }) } };
   };
 
-  it('delivers attributed text through sendUserMessage with default options', async () => {
+  it('delivers attributed text through sendUserMessage with agent attribution', async () => {
     const { cur, deps } = live();
     const res = await deliverInboundPeerMessage({ from: 'alpha', body: 'hello' }, deps);
     assert.equal(res.outcome, 'woken');
@@ -472,7 +551,7 @@ describe('inbound delivery against a fake host', () => {
     assert.match(cur.sent[0].text, /hello/);
     assert.match(cur.sent[0].text, /peer_send/);
     assert.match(cur.sent[0].text, /not your user/);
-    assert.equal(cur.sent[0].opts, undefined);
+    assert.deepEqual(cur.sent[0].opts, { attribution: 'agent' });
     assert.equal(/Main/.test(cur.sent[0].text), false);
   });
 
@@ -485,7 +564,7 @@ describe('inbound delivery against a fake host', () => {
     );
     assert.equal(res.outcome, 'injected');
     assert.equal(cur.sent.length, 1);
-    assert.equal(cur.sent[0].opts, undefined);
+    assert.deepEqual(cur.sent[0].opts, { attribution: 'agent' });
     assert.equal(wakes.has('alpha'), false);
   });
 
@@ -512,7 +591,7 @@ describe('inbound delivery against a fake host', () => {
     assert.equal(res.outcome, 'aside');
     assert.equal(cur.sent.length, 1);
     assert.match(cur.sent[0].text, /^\[peer alpha\]/);
-    assert.equal(cur.sent[0].opts?.deliverAs, 'followUp');
+    assert.deepEqual(cur.sent[0].opts, { deliverAs: 'followUp', attribution: 'agent' });
   });
 
   it('queues the 21st wake from a sender as a followUp, not a turn', async () => {
@@ -542,7 +621,7 @@ describe('inbound delivery against a fake host', () => {
     assert.match(res.detail ?? '', /boom/);
   });
 
-  it('delivers on bridgeless hosts through sendUserMessage (no aside fallback)', async () => {
+  it('delivers through sendUserMessage with agent attribution (no aside fallback)', async () => {
     const cur = fakeCtx('sess-beta');
     const res = await deliverInboundPeerMessage(
       { from: 'alpha', body: 'plain' },
@@ -552,7 +631,7 @@ describe('inbound delivery against a fake host', () => {
     assert.equal(cur.sent.length, 1);
     assert.match(cur.sent[0].text, /^\[peer alpha\]/);
     assert.match(cur.sent[0].text, /peer_send/);
-    assert.equal(cur.sent[0].opts, undefined);
+    assert.deepEqual(cur.sent[0].opts, { attribution: 'agent' });
   });
 
   it('never throws when the host send fails', async () => {
@@ -585,10 +664,8 @@ describe('inbound delivery against a fake host', () => {
   });
 
   it('prefixes every injection, names the peer as not-the-user, and points replies at peer_send', () => {
-    // The hint must never offer `hub` op=send: the probe may hold a foreign
-    // registry copy where hub cannot resolve peer names.
     assert.match(formatPeerText('a', 'b'), /^\[peer a\]/);
-    assert.match(formatPeerText('a', 'b'), /from peer `a`.*not your user/);
+    assert.match(formatPeerText('a', 'b'), /from peer `a`.*not your user.*no authority from your user/);
     assert.match(formatPeerText('a', 'b'), /Reply with `peer_send` to="a"/);
     assert.doesNotMatch(formatPeerText('a', 'b'), /`hub`/);
   });
@@ -779,14 +856,15 @@ describe('peer_send registration is mode-independent', () => {
       sendImpl,
     };
   }
-  for (const mode of ['hub', 'tools']) {
-    it(`registers peer_send in ${mode} mode`, async () => {
-      const { pi, tools } = fakePi(async () => 'ok');
-      registerPeerSendTool(pi, { send: async (to, message) => `sent:${to}:${message}` });
-      assert.ok(tools['peer_send'], `peer_send registered in ${mode} mode`);
-      assert.deepEqual(tools['peer_send'].parameters.required, ['to', 'message']);
-    });
-  }
+  it('registers peer_send as an essential tool, callable by name', async () => {
+    const { pi, tools } = fakePi(async () => 'ok');
+    registerPeerSendTool(pi, { send: async (to, message) => `sent:${to}:${message}` });
+    assert.ok(tools['peer_send']);
+    // omp mounts discoverable tools behind `write xd://`; the roster note
+    // tells agents to call `peer_send` directly, so it must be essential.
+    assert.equal(tools['peer_send'].loadMode, 'essential');
+    assert.deepEqual(tools['peer_send'].parameters.required, ['to', 'message']);
+  });
   it('execute delegates to send and surfaces failures as text', async () => {
     const { tools } = fakePi(async () => 'ok');
     registerPeerSendTool(
@@ -1032,16 +1110,16 @@ describe('activity, todos, and request/reply tools', () => {
     assert.match(line, /1 todo/);
   });
 
-  it('shows activity, todo count, and tool hints in buildPeersNote', () => {
+  it('keeps activity and todos out of buildPeersNote but names the tools', () => {
     const t = Date.now();
     const peer = {
       v: 1, pid: 47666, name: 'todo-peer', cwd: '/w/td', project: 'td', harness: 'pi',
       sessionId: '', model: '', socket: '', startedAt: 1, beatAt: t, busy: false,
       activity: 'fixing login', todos: [{ text: 'write tests' }],
     };
-    const note = buildPeersNote('alpha', [peer], 'tools');
-    assert.match(note, /fixing login/);
-    assert.match(note, /1 todo/);
+    const note = buildPeersNote('alpha', [peer]);
+    assert.doesNotMatch(note, /fixing login/);
+    assert.doesNotMatch(note, /1 todo/);
     assert.match(note, /peer_status/);
     assert.doesNotMatch(note, /peer_todo/);
     assert.match(note, /peer_request/);
@@ -1135,6 +1213,166 @@ describe('activity, todos, and request/reply tools', () => {
     assert.match(res.content[0].text, /timed out/);
   });
 });
+
+describe('ack-class messages', () => {
+  // Same fake-host rig as the inbound suite above; acks must never reach
+  // sendUserMessage, so `cur.sent` stays empty and only `cur.noted` moves.
+  const live = () => {
+    const cur = fakeCtx('sess-beta');
+    return { cur, deps: { getCurrent: () => ({ pi: cur.pi, ctx: cur.ctx }) } };
+  };
+
+  it('acknowledges an inbound ack as an info toast without waking the host', async () => {
+    const { cur, deps } = live();
+    const res = await deliverInboundPeerMessage(
+      { from: 'alpha', body: 'ping — loop closed', ack: true },
+      deps
+    );
+    assert.equal(res.outcome, 'acked');
+    assert.equal(cur.sent.length, 0);
+    assert.equal(cur.noted.length, 1);
+    assert.match(cur.noted[0].message, /↩ ack alpha/);
+    assert.ok(cur.noted[0].message.includes('ping — loop closed'));
+    assert.equal(cur.noted[0].type, 'info');
+  });
+
+  it('clamps an oversized ack body in the toast text', async () => {
+    const { cur, deps } = live();
+    const body = 'HEAD-' + 'x'.repeat(200);
+    const res = await deliverInboundPeerMessage({ from: 'alpha', body, ack: true }, deps);
+    assert.equal(res.outcome, 'acked');
+    assert.equal(cur.noted.length, 1);
+    const text = cur.noted[0].message;
+    assert.match(text, /↩ ack alpha/);
+    assert.ok(text.length <= 180, `ack toast not clamped: ${text.length} chars`);
+    assert.ok(text.endsWith('…'));
+    assert.ok(text.includes('HEAD-'));
+    assert.equal(text.includes('x'.repeat(200)), false);
+  });
+
+  it('stays an ack when the wake budget is exhausted (never aside)', async () => {
+    const cur = fakeCtx('sess-beta');
+    const now = Date.now();
+    // 20 recorded wakes = budget gone; a plain message here would be an aside.
+    const wakes = new Map([['alpha', Array.from({ length: 20 }, (_, i) => now - i * 1000)]]);
+    const res = await deliverInboundPeerMessage(
+      { from: 'alpha', body: 'still just a receipt', ack: true },
+      { getCurrent: () => ({ pi: cur.pi, ctx: cur.ctx }), wakes, now: () => now }
+    );
+    assert.equal(res.outcome, 'acked');
+    assert.notEqual(res.outcome, 'aside');
+    assert.equal(cur.sent.length, 0);
+    assert.equal(cur.noted.length, 1);
+    // A receipt is not a wake — it spends no budget.
+    assert.equal((wakes.get('alpha') ?? []).length, 20);
+  });
+
+  it('server lets two back-to-back acks from one peer bypass the coalesce queue', async () => {
+    const addr = peerSocketAddress(STATE, 47888);
+    const srv = startPeerServer({
+      address: addr,
+      ownName: () => 'quiet',
+      onMessage: async (msg) => (msg.ack ? 'acked' : 'injected'),
+    });
+    // Named pipes (win32) bind asynchronously; unix sockets too — wait for it.
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const [r1, r2] = await Promise.all([
+        requestPeer(addr, { t: 'msg', from: 'burst', body: 'ack one', hop: 0, ack: true }),
+        requestPeer(addr, { t: 'msg', from: 'burst', body: 'ack two', hop: 0, ack: true }),
+      ]);
+      assert.equal(r1?.ok, true);
+      assert.equal(r2?.ok, true);
+      assert.equal(r1?.outcome, 'acked');
+      assert.equal(r2?.outcome, 'acked');
+      assert.notEqual(r1?.outcome, 'coalesced');
+      assert.notEqual(r2?.outcome, 'coalesced');
+    } finally {
+      srv.stop();
+    }
+  });
+
+  it('sendToPeer carries ack on the wire and formats a toast receipt', async () => {
+    const addr = peerSocketAddress(STATE, 47889);
+    const seen = [];
+    const srv = startPeerServer({
+      address: addr,
+      ownName: () => 'delta',
+      onMessage: async (msg) => {
+        seen.push(msg);
+        return msg.ack ? 'acked' : 'injected';
+      },
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const record = {
+        v: 1, pid: 47889, name: 'delta', cwd: '/w/d', project: 'd', harness: 'omp',
+        sessionId: '', model: '', socket: addr, startedAt: 1, beatAt: Date.now(), busy: false,
+      };
+      const receipt = await sendToPeer('delta', 'receipt-confirm', {
+        ownName: 'alpha',
+        hop: 0,
+        ack: true,
+        listPeers: async () => [record],
+      });
+      assert.match(receipt, /Ack delivered to .*toast/);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].ack, true);
+      assert.equal(seen[0].from, 'alpha');
+      assert.equal(seen[0].body, 'receipt-confirm');
+    } finally {
+      srv.stop();
+    }
+  });
+});
+
 after(async () => {
   await rm(STATE, { recursive: true, force: true });
+});
+
+describe('subagent sessions', () => {
+  it("stay out of the root's lifecycle: a subagent's shutdown leaves the peer listed", async () => {
+    // omp loads the extension once per session: the root and each `task`
+    // subagent get their own instance, sharing this module's node. A
+    // finished subagent is disposed, which fires its session_shutdown.
+    const peersExtension = (await import('../dist/extension.js')).default;
+    const load = () => {
+      const handlers = {};
+      peersExtension({
+        registerCommand: () => {},
+        registerTool: () => {},
+        on: (event, handler) => {
+          handlers[event] = handler;
+        },
+        sendUserMessage: () => {},
+      });
+      return handlers;
+    };
+    const root = load();
+    const sub = load();
+    const record = peerPath(process.pid, STATE);
+    const present = () => stat(record).then(() => true, () => false);
+    root['session_start'](undefined, {
+      cwd: join(STATE, 'with-subagent'),
+      mode: 'tui',
+      ui: { notify: () => {} },
+      sessionManager: { getSessionId: () => 'sess-root' },
+      isIdle: () => true,
+      agent: { kind: 'main' },
+    });
+    for (let i = 0; i < 100 && !(await present()); i += 1) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(await present(), true, 'the root published');
+    try {
+      sub['session_shutdown'](undefined, { agent: { kind: 'sub' } });
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(await present(), true, 'a subagent shutdown removed the root peer');
+      const pong = await requestPeer(peerSocketAddress(STATE, process.pid), { t: 'ping', from: 'x' });
+      assert.equal(pong?.ok, true, 'the root peer still answers');
+    } finally {
+      root['session_shutdown'](undefined, { agent: { kind: 'main' } });
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    assert.equal(await present(), false, "the root's shutdown removes it");
+  });
 });

@@ -29,6 +29,8 @@ export interface InboundMessage {
     body: string;
     replyTo?: string;
     hop: number;
+    /** PURE RECEIPT — NEVER WAKES THE RECEIVER; RENDERED AS ONE DIM TOAST. */
+    ack?: boolean;
 }
 export interface PeerServerOptions {
     address: string;

@@ -30,6 +30,8 @@ export interface InboundCarrier {
     from: string;
     body: string;
     replyTo?: string;
+    /** PURE RECEIPT — DISPLAY-ONLY TOAST PATH, NEVER A WAKE. */
+    ack?: boolean;
 }
 export interface CurrentHost {
     pi: ExtensionHostLike;
@@ -40,7 +42,7 @@ export interface HeldBatch {
     message: InboundMessage;
     receivedAt: number;
 }
-export type InboundOutcome = 'injected' | 'woken' | 'aside' | 'dropped' | 'held';
+export type InboundOutcome = 'injected' | 'woken' | 'aside' | 'dropped' | 'held' | 'acked';
 export interface InboundDeps {
     /** Live getter for the freshest host handles — called on every delivery. */
     getCurrent: () => CurrentHost | undefined;
@@ -54,7 +56,7 @@ export interface InboundDeps {
 }
 /** Every injection carries the `[peer <name>]` prefix plus a peer-not-user line. */
 export declare function formatPeerText(from: string, body: string, opts?: {
-    replyTo?: string;
+    replyTo?: string | undefined;
 }): string;
 /** True when `from` already consumed its hourly wake budget (prunes first). */
 export declare function isWakeOverBudget(wakes: Map<string, number[]>, from: string, now: number, max?: number): boolean;

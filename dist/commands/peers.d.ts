@@ -9,7 +9,6 @@ import type { ExtensionHostLike } from '../peers/host.js';
 import type { PeerRecord } from '../types.js';
 export interface PeersSnapshot {
     ownName: string;
-    mode: 'hub' | 'tools';
     peers: PeerRecord[];
     /** Batches held while the peer types — shown so held mail is visible. */
     held?: number;

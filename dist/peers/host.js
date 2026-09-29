@@ -1,87 +1,26 @@
 /**
- * Host seam: narrow structural types plus the capability probe.
+ * Host seam: narrow structural types plus the harness probe.
  *
- * STRUCTURAL RULE (1): never import host singletons (`registry/agent-registry`,
- * `irc/bus`, `tools/hub/messaging`). The extension's module graph may bind a
- * FOREIGN copy of the host modules (two `static #global` instances), so the
- * host is touched ONLY through `ctx`/`pi` surfaces plus the bridge probed
- * below via literal-specifier dynamic imports inside try/catch (the host
- * loader rewrites literal specifiers to the host's own module instances).
- * Future #7401 seams slot in here.
+ * STRUCTURAL RULE: never read or write host singletons (`registry/agent-registry`,
+ * `irc/bus`). The extension's module graph may bind a FOREIGN copy of the
+ * host modules, and even the host's own registry is the host's local agent
+ * list: a peer registered there becomes a fake subagent that `agent://all`
+ * broadcasts reach, Agent Hub lists, and every spawned subagent can message.
+ * The host is touched ONLY through `ctx`/`pi` surfaces.
  */
 /**
- * True when the probed registry is the HOST's own (shared) copy. The host
- * always keeps its driving agent registered, so a shared copy resolves
- * `Main`; a foreign module copy — which the compiled omp binary hands to
- * dynamic importers — has an empty map and nothing we claim there is
- * visible to the host's `hub`. Bridges that fail this probe must not claim
- * refs or promise `hub send` in the roster.
+ * omp or pi? omp resolves its own package's module paths for extensions and
+ * pi does not, so the import is dynamic: a static one would fail to load
+ * under pi. Only the resolution is used; nothing on the module is read.
  */
-export function bridgeResolvesHost(bridge) {
+export async function detectHarness() {
     try {
-        // 'Main' is the host driving agent's registry id — a presence probe,
-        // never a delivery address (see ids.ts REFUSED_HOST_NAME).
-        return bridge.registry.get('Main') !== undefined;
+        await import('@oh-my-pi/pi-coding-agent/registry/agent-registry');
+        return 'omp';
     }
     catch {
-        return false;
+        return 'pi';
     }
-}
-/**
- * Capability probe. Literal specifiers only (the host rewrites them), always
- * inside try/catch: on any host without these modules this resolves
- * `{kind:'tools'}` and the extension falls back to the `peer_send` surface.
- * The result caches host MODULE handles only — never any session object.
- */
-export async function probeHost() {
-    try {
-        const registryModule = (await import('@oh-my-pi/pi-coding-agent/registry/agent-registry'));
-        const agentRegistry = registryModule['AgentRegistry'];
-        if (typeof agentRegistry?.global !== 'function') {
-            return { kind: 'tools' };
-        }
-        return {
-            kind: 'hub-bridge',
-            bridge: { registry: agentRegistry.global() },
-        };
-    }
-    catch {
-        return { kind: 'tools' };
-    }
-}
-function registryRefs(registry) {
-    try {
-        if (typeof registry.values === 'function')
-            return [...registry.values()];
-        if (typeof registry.list === 'function') {
-            const out = registry.list();
-            return Array.isArray(out) ? out : [];
-        }
-        if (typeof registry.entries === 'function') {
-            return [...registry.entries()].map(([, v]) => v);
-        }
-    }
-    catch {
-        return [];
-    }
-    return [];
-}
-/**
- * `peerSocket` marker). Used to keep a session name from colliding with a
- * live subagent address during peer-name deconfliction.
- */
-export function listLocalAgentIds(registry) {
-    const ids = [];
-    for (const ref of registryRefs(registry)) {
-        if (typeof ref.id !== 'string' || ref.id === '')
-            continue;
-        const session = ref.session;
-        if (session !== null && typeof session === 'object' && session.peerSocket !== undefined) {
-            continue;
-        }
-        ids.push(ref.id);
-    }
-    return ids;
 }
 /**
  * Who named this session. The host marks explicit renames `"user"` and
@@ -225,84 +164,4 @@ export function readNativeTodos(manager) {
             return mapNativeTodos(phases);
     }
     return [];
-}
-export function peerActivityFor(record) {
-    return `${record.harness} instance pid ${record.pid} in ${record.cwd}${record.busy ? ' (working)' : ''}`;
-}
-/**
- * Materialize a remote peer as a registry ref so native `hub send`/`hub list`
- * reach it. `kind:'sub'` + `status:'idle'` keeps the stub inside the host's
- * flat alive filter and clear of the parked lifecycle gate, so `hub send`
- * goes straight to the stub's `deliverIrcMessage` (socket round trip).
- * Refuses to overwrite a live local (non-peer) ref of the same id.
- */
-export function claimBridgedPeer(bridge, record, ownName, getHop, request, onWarn) {
-    let existing;
-    try {
-        existing = bridge.registry.get(record.name);
-    }
-    catch {
-        existing = undefined;
-    }
-    if (existing !== undefined && existing.session?.peerSocket === undefined) {
-        try {
-            onWarn?.(`peers: name "${record.name}" collides with a local agent; skipping bridge`);
-        }
-        catch {
-            // Warning delivery is best-effort.
-        }
-        return false;
-    }
-    const stub = {
-        isStreaming: false,
-        peerSocket: record.socket,
-        subscribe: () => () => undefined,
-        subscribeRunState: () => () => undefined,
-        waitForIrcReplies: async () => [],
-        deliverIrcMessage: async (msg) => {
-            const reply = await request(record.socket, {
-                t: 'msg',
-                from: ownName,
-                body: msg.body,
-                ...(msg.replyTo !== undefined && msg.replyTo !== '' ? { replyTo: msg.replyTo } : {}),
-                hop: getHop(),
-            });
-            // A dead socket or refused frame is a FAILURE, not a delivery: throwing
-            // makes the host bus report outcome 'failed' with this error text
-            // instead of the old blanket 'injected' that lied to hub senders.
-            if (reply === undefined || !reply.ok) {
-                throw new Error(reply?.error ?? 'peer socket unreachable');
-            }
-            // Pass the real outcome through ('woken'/'injected'/'held'/'aside'/
-            // 'dropped') — the receipt must show what the peer actually did.
-            return reply.outcome ?? 'injected';
-        },
-    };
-    try {
-        bridge.registry.register({
-            id: record.name,
-            displayName: `${record.name} · ${record.project}`,
-            kind: 'sub',
-            status: 'idle',
-            session: stub,
-            sessionFile: null,
-            activity: peerActivityFor(record),
-        });
-    }
-    catch {
-        return false;
-    }
-    return true;
-}
-/** Release a bridged peer ref, but only one this extension owns (marker). */
-export function releaseBridgedPeer(bridge, name) {
-    try {
-        const ref = bridge.registry.get(name);
-        if (ref?.session?.peerSocket === undefined)
-            return;
-        bridge.registry.unregister(name);
-    }
-    catch {
-        // Release is best-effort.
-    }
 }

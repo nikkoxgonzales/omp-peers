@@ -12,8 +12,9 @@ export { writePeerBeat, listLivePeers, removePeerRecord, startPresenceBeat, form
 export { MAX_HOPS, COALESCE_MS, PEER_REQUEST_TIMEOUT_MS, SOCKET_IDLE_MS, MAX_FRAME_BYTES, peerSocketAddress, startPeerServer, requestPeer, type InboundMessage, type PeerServerOptions, type PeerServerHandle, } from './peers/server.js';
 export { deliverInboundPeerMessage, formatPeerText, isWakeOverBudget, recordPeerWake, MAX_WAKES_PER_PEER_PER_HOUR, WAKE_WINDOW_MS, HOLD_TIMEOUT_MS, MAX_HELD_BATCHES, HOLD_POLL_MS, type InboundCarrier, type CurrentHost, type InboundOutcome, type InboundDeps, type HeldBatch, } from './peers/inbound.js';
 export { sendToPeer, outboundHop, type HopState, type OutboundDeps } from './peers/outbound.js';
-export { buildPeersNote, appendNoteToMessages, type RosterMode, type RosterMessage, } from './peers/roster.js';
-export { probeHost, listLocalAgentIds, claimBridgedPeer, readTitleSource, readNativeTodos, MAX_PEER_TODOS, MAX_PEER_TODO_TEXT_CHARS, releaseBridgedPeer, peerActivityFor, type HostProbe, type HubBridge, type RegistryLike, type RegistryRefLike, type PeerRequestFn, type CommandContextLike, type ExtensionHostLike, type UiLike, type SelectOption, } from './peers/host.js';
+export { buildPeersNote, appendNoteToMessages, type RosterMessage, } from './peers/roster.js';
+export { detectHarness, readTitleSource, readNativeTodos, MAX_PEER_TODOS, MAX_PEER_TODO_TEXT_CHARS, type CommandContextLike, type ExtensionHostLike, type UiLike, type SelectOption, } from './peers/host.js';
+export { checkFrame, checkReply, type FrameCheck, type FrameRejection } from './peers/wire.js';
 export { formatPeersText, formatPeerLine, type PeersSnapshot } from './commands/peers.js';
 export { registerPeerSendTool, registerPeerStatusTool, registerPeerRequestTool, type PeerSendDeps, type PeerStatusDeps, type PeerRequestDeps, } from './tools.js';
 export * from './errors.js';
